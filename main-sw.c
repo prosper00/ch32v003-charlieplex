@@ -5,8 +5,8 @@
  *
  * Pin Map: (See schematic PNG for circuit diagram of the LEDs)
  * pin 1: cathode group 1	pin 8: SWIO/debug
- * pin 2: GND			pin 7: free
- * pin 3: cathode group 2	pin 6: cathode group 4
+ * pin 2: GND			pin 7: cathode group 2
+ * pin 3: potentiometer		pin 6: cathode group 4
  * pin 5: 3V3			pin 5: cathode group 3
  *
  * in a charlieplexed matrix, the maximum number of LEDs is equalt to n*(n-1)
@@ -20,19 +20,7 @@
  * high degree of abstraction is offered, allowing a reasonable flexibility in
  * the assignment of GPIOs and the order of the LEDs available in software.
  *
- * (maybe) TODO 1 - Hardware PWM. This would require all LED GPIOs to be timer 
- * outputs, and then switch the common cathode groups every millisecond or so. 
- * Ought to be much less CPU intensive and higher resolution than the current
- * software PWM approach. 
- * On the smallest CH32v003 package (SOP8), there are exactly 4 timer pins
- * available (reserving pin 8 for SWIO programming/debugging):
- * pin1=T1CH2, pin7=T1CH1, pin6=T2CH2, pin5=T2CH4
- * this leaves pin3 free for other uses, including analog input.
- *
  * (maybe) TODO 2: allow for matrices other than 4-wire
- *
- * BUG: brightness values of '0' cause... weirdness. Occasionally, '0' seems to
- * generate much higher than expected brigtness to be output. Dunno why.
  *
  */
 
@@ -54,11 +42,7 @@
 #define SYSTICK_CTLR_STRE (1<<3)
 #define SYSTICK_CTLR_SWIE (1<<31)
 
-#define SYSTICKHZ 32000
-
-uint32_t count;
-volatile uint32_t systick_cnt;
-
+#define SYSTICKHZ 48000
 
 /* this is the truth table for the LEDs, defining how they're connected
  * and how to set the GPIO pins to select a specific LED. (unused GPIOs
@@ -69,23 +53,24 @@ volatile uint32_t systick_cnt;
 typedef struct {
 	const uint8_t pinCathode; //pin to set LOW
 	const uint8_t pinAnode;	  //pin to set HIGH
-	uint8_t brightness;
+	volatile uint8_t brightness;
 } Connection;
 
+//PA2=PC4
 volatile Connection LEDs[12] = { 
 //	 GPIO LO  GPIO HI
-	{ pin_A1, pin_A2, 16 },	// LED 0
-	{ pin_A2, pin_A1, 63 },	// LED 1
-	{ pin_A2, pin_C1, 32 },	// LED 2
-	{ pin_C1, pin_A2, 16 },	// LED 3
-	{ pin_A1, pin_C1, 7  },	// LED 4
-	{ pin_C1, pin_A1, 6  },	// LED 5
-	{ pin_C2, pin_C1, 5  },	// LED 6
+	{ pin_A1, pin_C4, 8  },	// LED 0
+	{ pin_C4, pin_A1, 63 },	// LED 1
+	{ pin_C4, pin_C1, 32 },	// LED 2
+	{ pin_C1, pin_C4, 16 },	// LED 3
+	{ pin_A1, pin_C1, 16 },	// LED 4
+	{ pin_C1, pin_A1, 16 },	// LED 5
+	{ pin_C2, pin_C1, 8  },	// LED 6
 	{ pin_C1, pin_C2, 4  },	// LED 7
-	{ pin_A2, pin_C2, 3  },	// LED 8
-	{ pin_C2, pin_A2, 2  },	// LED 9
-	{ pin_A1, pin_C2, 1  },	// LED 10
-	{ pin_C2, pin_A1, 1  }	// LED 11
+	{ pin_C4, pin_C2, 2  },	// LED 8
+	{ pin_C2, pin_C4, 0  },	// LED 9
+	{ pin_A1, pin_C2, 2  },	// LED 10
+	{ pin_C2, pin_A1, 4  }	// LED 11
 };
 
 /* to be used to iterate through each group of LEDs. 
@@ -94,10 +79,100 @@ volatile Connection LEDs[12] = {
  */
 static const uint8_t group[4][3] = {	//4 cathode groups of 3 LEDs each
 	{ 0, 4, 10 },	// LEDs sharing pin_A1
-	{ 1, 2, 8  },	// LEDs sharing pin_A2
+	{ 1, 2, 8  },	// LEDs sharing pin_C4
 	{ 3, 5, 7  },	// LEDs sharing pin_C1
 	{ 6, 9, 11 }	// LEDs sharing pin_C2
 };
+
+void adc_init( void )
+{
+	/*
+	// ADCCLK = 24 MHz => RCC_ADCPRE = 0: divide by 2
+	RCC->CFGR0 &= ~(0x1F<<11);
+	
+	// Enable GPIOC and ADC
+	RCC->APB2PCENR |= RCC_APB2Periph_GPIOC | RCC_APB2Periph_ADC1;
+	
+	// PC4 is analog input chl 2
+	GPIOC->CFGLR &= ~(0xf<<(4*4));	// CNF = 00: Analog, MODE = 00: Input
+	
+	// Reset the ADC to init all regs
+	RCC->APB2PRSTR |= RCC_APB2Periph_ADC1;
+	RCC->APB2PRSTR &= ~RCC_APB2Periph_ADC1;
+	
+	// Set up single conversion on chl 2 
+	ADC1->RSQR1 = 0;
+	ADC1->RSQR2 = 0;
+	ADC1->RSQR3 = ADC_Channel_2;	// 0-9 for 8 ext inputs and two internals
+	
+	// set sampling time for chl 2
+	ADC1->SAMPTR2 &= ~ADC_SMP2;
+	ADC1->SAMPTR2 |= ( ADC_SampleTime_3Cycles << (3 * ADC_Channel_2 ) );	// 0:7 => 3/9/15/30/43/57/73/241 cycles
+		
+	// turn on ADC and set rule group to sw trig
+	ADC1->CTLR2 |= ADC_ADON | ADC_EXTSEL;
+	
+	// Reset calibration
+	ADC1->CTLR2 |= ADC_RSTCAL;
+	while(ADC1->CTLR2 & ADC_RSTCAL);
+	
+	// Calibrate
+	ADC1->CTLR2 |= ADC_CAL;
+	while(ADC1->CTLR2 & ADC_CAL);
+	
+	// should be ready for SW conversion now
+	*/
+	
+	// ADCCLK = 24 MHz => RCC_ADCPRE = 0: divide by 2
+	RCC->CFGR0 &= ~(0x1F<<11);
+	
+	// Enable GPIOC and ADC
+	RCC->APB2PCENR |= RCC_APB2Periph_GPIOA | RCC_APB2Periph_ADC1;
+	
+	// PA2 is analog input chl 0
+	GPIOA->CFGLR &= ~(0xf<<(4*GPIO_PinSource2));	// CNF = 00: Analog, MODE = 00: Input
+	
+	// Reset the ADC to init all regs
+	RCC->APB2PRSTR |= RCC_APB2Periph_ADC1;
+	RCC->APB2PRSTR &= ~RCC_APB2Periph_ADC1;
+	
+	// Set up single conversion on chl 0 
+	ADC1->RSQR1 = 0;
+	ADC1->RSQR2 = 0;
+	ADC1->RSQR3 = ADC_Channel_0;	// 0-9 for 8 ext inputs and two internals
+	
+	// set sampling time for chl 0
+	ADC1->SAMPTR2 &= ~ADC_SMP2;
+	ADC1->SAMPTR2 |= ( ADC_SampleTime_3Cycles << (3 * ADC_Channel_0 ) );	// 0:7 => 3/9/15/30/43/57/73/241 cycles
+		
+	// turn on ADC and set rule group to sw trig
+	ADC1->CTLR2 |= ADC_ADON | ADC_EXTSEL;
+	
+	// Reset calibration
+	ADC1->CTLR2 |= ADC_RSTCAL;
+	while(ADC1->CTLR2 & ADC_RSTCAL);
+	
+	// Calibrate
+	ADC1->CTLR2 |= ADC_CAL;
+	while(ADC1->CTLR2 & ADC_CAL);
+	
+	// should be ready for SW conversion now
+}
+
+/*
+ * start conversion, wait and return result
+ */
+uint16_t adc_get( void )
+{
+	// start sw conversion (auto clears)
+	ADC1->CTLR2 |= ADC_SWSTART;
+	
+	// wait for conversion complete
+	while(!(ADC1->STATR & ADC_EOC));
+	
+	// get result
+	return ADC1->RDATAR;
+}
 
 /*
  * Setup systick to fire an interrput at SYSTICKHZ Hz
@@ -118,7 +193,6 @@ void systick_init(void)
 	
 	/* Start at zero */
 	SysTick->CNT = 0;
-	systick_cnt = 0;
 	
 	/* Enable SysTick counter, IRQ, HCLK/1 */
 	SysTick->CTLR = SYSTICK_CTLR_STE | SYSTICK_CTLR_STIE |
@@ -159,13 +233,10 @@ void SysTick_Handler(void)
 	/* clear IRQ */
 	SysTick->SR = 0;
 
-	/* update counter */
-	systick_cnt++;
+	static uint8_t ramp = 0,  
+		       currentgroup = 0; //the common cathode group of LEDs are being worked on
 
-	static uint8_t ramp,  
-		       currentgroup; //the common cathode group of LEDs are being worked on
-
-	ramp=systick_cnt & 0x3F;		// 0 to 63
+	ramp = ( ramp + 1 ) & 0x3F;		// 0 to 63
 	
 	if (ramp == 0) {
 		pinMode(LEDs[group[currentgroup][0]].pinCathode, pinMode_I_floating); // switch off this group
@@ -175,33 +246,40 @@ void SysTick_Handler(void)
 		pinMode(LEDs[group[currentgroup][0]].pinCathode, pinMode_O_pushPull); // switch on the group
 		digitalWrite(LEDs[group[currentgroup][0]].pinCathode, low);
 		
-		pinMode(LEDs[group[currentgroup][0]].pinAnode, pinMode_O_pushPull); // switch on this LED
-		digitalWrite(LEDs[group[currentgroup][0]].pinAnode, high);
+		if (LEDs[group[currentgroup][0]].brightness) { 
+			pinMode(LEDs[group[currentgroup][0]].pinAnode, pinMode_O_pushPull); // switch on this LED
+			digitalWrite(LEDs[group[currentgroup][0]].pinAnode, high);
+		}
 
-		pinMode(LEDs[group[currentgroup][1]].pinAnode, pinMode_O_pushPull); // switch on this LED
-		digitalWrite(LEDs[group[currentgroup][1]].pinAnode, high);
+		if (LEDs[group[currentgroup][1]].brightness) { 
+			pinMode(LEDs[group[currentgroup][1]].pinAnode, pinMode_O_pushPull); // switch on this LED
+			digitalWrite(LEDs[group[currentgroup][1]].pinAnode, high);
+		}
 		
-		pinMode(LEDs[group[currentgroup][2]].pinAnode, pinMode_O_pushPull); // switch on this LED
-		digitalWrite(LEDs[group[currentgroup][2]].pinAnode, high);
+		if (LEDs[group[currentgroup][2]].brightness) { 
+			pinMode(LEDs[group[currentgroup][2]].pinAnode, pinMode_O_pushPull); // switch on this LED
+			digitalWrite(LEDs[group[currentgroup][2]].pinAnode, high);
+		}
 	}
-	if (LEDs[group[currentgroup][0]].brightness == ramp) { // if the target pulse width has been achieved
+
+	/* if (LEDs[group[currentgroup][0]].brightness == ramp) { // if the target pulse width has been achieved
+	 *
+	 * When written like this, it seems to occasionally 'miss' this check
+	 * and glitches the brightness output. No idea why. Disabling the interrupts doesn't work. 
+	 * disabling the counter at various points doesn't work. increasing or decreasing the 
+	 * interrupt rate doesn't work. 
+	 *
+	 */
+
+	if (LEDs[group[currentgroup][0]].brightness <= ramp) { // if the target pulse width has been achieved
 		pinMode(LEDs[group[currentgroup][0]].pinAnode, pinMode_I_floating); // switch off this LED
 	}
-	if (LEDs[group[currentgroup][1]].brightness == ramp) {
+	if (LEDs[group[currentgroup][1]].brightness <= ramp) {
 		pinMode(LEDs[group[currentgroup][1]].pinAnode, pinMode_I_floating); // switch off this LED
 	}
-	if (LEDs[group[currentgroup][2]].brightness == ramp) {
+	if (LEDs[group[currentgroup][2]].brightness <= ramp) {
 		pinMode(LEDs[group[currentgroup][2]].pinAnode, pinMode_I_floating); // switch off this LED
 	}
-}
-
-void Delay_Ticks(uint32_t n) {/* 1ms = SYSTICKHZ/1000 ticks */
-	uint32_t end = systick_cnt + n; 
-	while( ((int32_t)(systick_cnt - end )) < 0 );
-}
-
-void Delay_ms_ticks(uint32_t n) {
-	Delay_Ticks(SYSTICKHZ/1000*n);
 }
 
 /*
@@ -210,6 +288,7 @@ void Delay_ms_ticks(uint32_t n) {
 int main() {
 	SystemInit48HSI();
 	systick_init();
+	adc_init();
 
 	// Enable GPIO ports
 	portEnable(port_A);
@@ -223,7 +302,8 @@ int main() {
 
 	while(1){
 				
-		Delay_ms_ticks(30);
+		int Delay = adc_get();
+		Delay_Ms(( Delay >> 3 ) + 5 );
 		int temp=LEDs[0].brightness;
 		for(int i=1; i<12; i++){
 			LEDs[i-1].brightness=LEDs[i].brightness;

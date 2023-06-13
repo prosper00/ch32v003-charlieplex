@@ -1,8 +1,11 @@
-TARGET:=main
+
+# main-sw for software PWM version
+# main-pwn for timer hardware PWM version
+TARGET:=main-sw
 
 all : $(TARGET).bin
 
-CFLAGS+=-DSTDOUT_UART
+# CFLAGS+=-DSTDOUT_UART
 CFLAGS+=-DTINYVECTOR
 ADDITIONAL_C_FILES+=wiring.c
 
