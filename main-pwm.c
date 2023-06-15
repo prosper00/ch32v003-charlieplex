@@ -5,18 +5,17 @@
  * leaves one additional GPIO/ADC pin free for other uses.
  *
  * Pin Map: (See schematic PNG for circuit diagram of the LEDs)
- * pin 1: cathode group 1	pin 8: SWIO/debug
- * pin 2: GND		pin 7: cathode group 2
- * pin 3: Potentiometer	pin 6: cathode group 4
- * pin 5: 3V3		pin 5: cathode group 3
+ * pin 1: array pin1	pin 8: SWIO/debug
+ * pin 2: GND		pin 7: array pin2
+ * pin 3: Potentiometer	pin 6: array pin3 
+ * pin 5: 3V3		pin 5: array pin4
  *
  * pin1=T1CH2,PA1, pin7=T1CH4,PC4, pin6=T2CH2_1,PC2,remap, pin5=T2CH4_1,PC1,remap
  *
- * in a charlieplexed matrix, the maximum number of LEDs is equalt to n*(n-1)
+ * in a charlieplexed matrix, the maximum number of LEDs is equal to n*(n-1)
  * where n is the number of GPIOs used. Only LEDs sharing a common anode 
- * (or a common anode) can be lit simultaneously. This should be equal to 
- * (n-1). So for an n=4 array, there can be 12 LEDs in total, and 3 can be 
- * lit simultaneously
+ * can be lit simultaneously. This should be equal to (n-1). For an n=4 array, 
+ * there can be 12 LEDs in total, and 3 can be lit simultaneously
  *
  * Hardware PWM version. All LED GPIOs are timer outputs, switching 
  * the common pin groups every millisecond or so in the systick ISR.
@@ -25,7 +24,6 @@
  *
  */
 
-// Could be defined here, or in the processor defines.
 #define SYSTEM_CORE_CLOCK 48000000
 #define APB_CLOCK SYSTEM_CORE_CLOCK
 #define SYSTICK_USE_HCLK
@@ -43,7 +41,11 @@
 
 #define SYSTICKHZ 1000
 
-/*maps the GPIO pins to their associated timer and output channel*/
+/*maps the GPIO pins to their associated timer and output channel
+ * NOTE: this definition is using alternate function remapping
+ * and not the default channel mappings. Search for 'AFIO' to see
+ * where this is activated
+ */
 typedef struct {
 	GPIO_TypeDef* port;
 	uint8_t pin;
@@ -51,23 +53,22 @@ typedef struct {
 	uint16_t channel;
 } timermap_typedef;
 
+/* pin1=T1CH2,PA1, pin7=T1CH4,PC4, pin6=T2CH2_1,PC2,remap, pin5=T2CH4_1,PC1,remap */
 timermap_typedef PA1 = {GPIOA, 1, TIM1, TIM_CC2E};
 timermap_typedef PC4 = {GPIOC, 4, TIM1, TIM_CC4E};
 timermap_typedef PC2 = {GPIOC, 2, TIM2, TIM_CC2E};
 timermap_typedef PC1 = {GPIOC, 1, TIM2, TIM_CC4E};
 
-/* this is the truth table for the LEDs, defining how they're connected
- * and how to set the GPIO pins to select a specific LED. (unused GPIOs
- * should be set as floating inputs)
+/* this is the connection table for the LEDs, defining how they're connected.
+ * Adjust the 'brightness' value in software to individually set a LED's brigness
  */
-typedef struct {	//Defines the Cathode pins for each LED
+typedef struct {
 	timermap_typedef* anode;	//e.g. PA1
 	timermap_typedef* cathode;
 	volatile uint8_t brightness;
 } Connection;
 
-/* pin1=T1CH2,PA1, pin7=T1CH4,PC4, pin6=T2CH2_1,PC2,remap, pin5=T2CH4_1,PC1,remap */
-/* LED pin connection map */
+/* LED pin connection map - see included PNG schematic.*/
 volatile Connection LEDs[12] = { 
 //	anode port,pin cathode port,pin,timer,channel,	brightness
 	{&PC4,	&PA1,	16	},	// LED 0
@@ -85,8 +86,8 @@ volatile Connection LEDs[12] = {
 };
 
 /* to be used to iterate through each group of LEDs. 
- * TODO: calculate this at runtime from the data in the
- * Connection struct
+ * A 'group' is defined as all the LED's that are sharing a common anode point
+ * TODO: calculate this at runtime from the data in the 'Connection' struct
  * something like if(LEDs[i].anode==&PA1) {group[?][?]=[i]}
  */
 static const uint8_t group[4][3] = {	//4 common-anode groups of 3 LEDs each
@@ -116,8 +117,6 @@ void t1t2_pwm_init( void )
 	RCC->APB1PRSTR |=  RCC_APB1Periph_TIM2;
 	RCC->APB1PRSTR &= ~RCC_APB1Periph_TIM2;
 
-/* pin1=T1CH2,PA1, pin7=T1CH4,PC4, pin6=T2CH2_1,PC2,remap, pin5=T2CH4_1,PC1,remap */
-	
 	// PC4 is T1CH4, 10MHz Output alt func, open-drain
 	GPIOC->CFGLR &= ~(0xf<<(4*GPIO_PinSource4));
 	GPIOC->CFGLR |= (GPIO_Speed_10MHz | GPIO_CNF_OUT_OD_AF)<<(4*GPIO_PinSource4);
@@ -133,8 +132,6 @@ void t1t2_pwm_init( void )
 
 	// Remap mode 01: TIM2 Partial mapping (CH1/ETR/PC5, CH2/PC2, CH3/PD2, CH4/PC1).
 	AFIO->PCFR1 |= AFIO_PCFR1_TIM2_REMAP_PARTIALREMAP1;
-
-	// SMCFGR: default clk input is CK_INT
 
 	// Prescaler - this, along with the period, will determine the PWM frequency
 	TIM1->PSC = 0x0000;
@@ -153,14 +150,13 @@ void t1t2_pwm_init( void )
 	TIM1->CTLR1 |= TIM_ARPE;
 	TIM2->CTLR1 |= TIM_ARPE;
 
-	// Set the Capture Compare Register value to 50% initially
-	TIM1->CH2CVR = 16; //T1CH2/PA1/pin1
-	TIM1->CH4CVR = 16; //T1CH4/PC4/pin7
-	TIM2->CH2CVR = 16; //T2CH2/PC2/pin6*
-	TIM2->CH4CVR = 16; //T2CH4/PC1/pin5*
+	// Set the Capture Compare Register value to 0 initially
+	TIM1->CH2CVR = 0; //T1CH2/PA1/pin1
+	TIM1->CH4CVR = 0; //T1CH4/PC4/pin7
+	TIM2->CH2CVR = 0; //T2CH2/PC2/pin6*
+	TIM2->CH4CVR = 0; //T2CH4/PC1/pin5*
 	                    // * - alternate function
 
-/* pin1=T1CH2,PA1, pin7=T1CH4,PC4, pin6=T2CH2,PC2,remap, pin5=T2CH4,PC1,remap */
 	TIM1->CCER |= TIM_CC2E | TIM_CC2P;	// Enable T1CH2 output, positive pol
 	TIM1->CCER |= TIM_CC4E | TIM_CC4P;	// Enable T1CH4 output, positive pol
 	TIM2->CCER |= TIM_CC2E | TIM_CC2P;	// Enable T2CH2 output, positive pol
@@ -170,8 +166,6 @@ void t1t2_pwm_init( void )
 	TIM1->CHCTLR2 |= TIM_OC4M_2 | TIM_OC4M_1;	// CH4 Mode is output, PWM1 (CC1S = 00, OC1M = 110)
 	TIM2->CHCTLR1 |= TIM_OC2M_2 | TIM_OC2M_1 | TIM_OC2PE;
 	TIM2->CHCTLR2 |= TIM_OC4M_2 | TIM_OC4M_1 | TIM_OC4PE;
-	// for channel 1 and 2, let CCxS stay 00 (output), set OCxM to 110 (PWM I)
-	// enabling preload causes the new pulse width in compare capture register only to come into effect when UG bit in SWEVGR is set (= initiate update) (auto-clears)
 
 	TIM1->BDTR  |= TIM_MOE;	// Brake and deadband registers
 	TIM1->CTLR1 |= TIM_CEN;	// Enable TIM1
@@ -179,9 +173,11 @@ void t1t2_pwm_init( void )
 }
 
 /* 
+ * void GPIO_Low(GPIO_TypeDef* port, uint8_t pin, TIM_TypeDef* timer, uint16_t channel)
+ *
  * Detaches pin from timer output, sets to OD output mode, sets output low
  *
- * Example: GPIO_Low(GPIOA, GPIO_PinSource1, TIM1, TIM_CC1E); // detach PA1 from T1C1, sets OD mode, Low
+ * Example: GPIO_Low(GPIOA, 1, TIM1, TIM_CC1E); // detach PA1 from T1C1, sets OD mode, Low
  * 
  */
 void GPIO_Low(GPIO_TypeDef* port, uint8_t pin, TIM_TypeDef* timer, uint16_t channel) {
@@ -191,7 +187,9 @@ void GPIO_Low(GPIO_TypeDef* port, uint8_t pin, TIM_TypeDef* timer, uint16_t chan
         port->BCR = (1<<(pin));         //set GPIO 'low'
 };
 
-/* 
+/*
+ * void GPIO_High(GPIO_TypeDef* port, uint8_t pin, TIM_TypeDef* timer, uint16_t channel)
+ *
  * Detaches pin from timer output, sets to PP output mode, sets output high
  *
  * Example: GPIO_High(GPIOA, GPIO_PinSource1, TIM1, TIM_CC1E); // detach PA1 from T1C1, sets PP mode, High
@@ -205,6 +203,8 @@ void GPIO_High(GPIO_TypeDef* port, uint8_t pin, TIM_TypeDef* timer, uint16_t cha
 };
 
 /* 
+ * void GPIO_Float(GPIO_TypeDef* port, uint8_t pin, TIM_TypeDef* timer, uint16_t channel)
+ *
  * Detaches pin from timer output, sets to input mode
  *
  * Example: GPIO_Float(GPIOA, GPIO_PinSource1, TIM1, TIM_CC1E); // detach PA1 from T1C1, sets PP mode, High
@@ -218,6 +218,8 @@ void GPIO_Float(GPIO_TypeDef* port, uint8_t pin, TIM_TypeDef* timer, uint16_t ch
 };
 
 /* 
+ * void GPIO_PWM(GPIO_TypeDef* port, uint8_t pin, TIM_TypeDef* timer, uint16_t channel) {
+ *
  * Attaches pin to timer output, sets to OD_AF output mode
  * Requires the appropriate timer to be configured already.
  *
@@ -231,6 +233,8 @@ void GPIO_PWM(GPIO_TypeDef* port, uint8_t pin, TIM_TypeDef* timer, uint16_t chan
 };
 
 /*
+ * void pwm_setpw(TIM_TypeDef* timer, uint16_t chl, uint16_t width)
+ *
  * set timer channel PW
  *
  * Example: pwm_setpw(TIM1, 1, 128); // Set TIM1CH1 to pulsewidth of 128
@@ -248,8 +252,6 @@ void pwm_setpw(TIM_TypeDef* timer, uint16_t chl, uint16_t width)
 
 /*
  * Setup systick to fire an interrput at SYSTICKHZ Hz
- *
- * TODO: is this necessary, or does ch32v003fun init systick to 1kHz already?
  */
 void systick_init(void) {
 	/* disable default SysTick behavior */
@@ -269,23 +271,22 @@ void systick_init(void) {
 					SYSTICK_CTLR_STCLK;
 }
 
+
+/****************************************************************************
+ * Where the magic happens. Every time this function is called, it switches to the next
+ * group of LED's and sets their brigtness. If this function is called frequently and 
+ * consistently enough, persistence-of-vision makes it appear that each individual LED 
+ * is able to be lit to any desired brigtness simultaneously.
+ *
+ * Best to call this from an ISR at a regular rate (millisecond/tens of milliseconds)
+ *
+ * Takes no arguments. Returns nothing.
+ * *************************************************************************/
 void updateLEDs(void)
 {
-/********************************************************
- * Where all the magic happens. Call this routine regularly (in a systick millisecond ISR is ideal)
- *
- * 1. Set all pins Float (PWM off).
- * 2. Switch to next group of LEDs
- * 3. Update PWM brightness settings (at this point, nothing is being actually output)
- * 4. Select next group's cathodes (3 of them), and set to PWM
- * 5. Set the next group's anode pin HIGH
- *
- * At any given time (except when switching groups) there's one pin HIGH, and the other 3 pins on OD PWM
- *
- ********************************************************/
 	static uint8_t currentgroup = 0; //the common anode group of LEDs are being worked on
 
-  	/* 1. Set current PWM pins to Float (PWM off) */
+  	/* 1. Set current PWM pins to Float (PWM off) (probably not strictly necessary */
 	for(int i=0;i<3;i++){
 		GPIO_Float(	LEDs[group[currentgroup][i]].cathode->port,
 				LEDs[group[currentgroup][i]].cathode->pin,
@@ -294,10 +295,10 @@ void updateLEDs(void)
 			  );
 	}
 		
-	/* 2. Switch to next group of LEDs */
+	/* 2. Select the next group of LEDs */
 	if(++currentgroup == 4) currentgroup=0;
 		
-	/* 3. Update PWM brightness settings */
+	/* 3. Update PWM brightness settings for the currently selected group */
 	for(int i=0;i<3;i++){
 		pwm_setpw(	LEDs[group[currentgroup][i]].cathode->timer,
 				LEDs[group[currentgroup][i]].cathode->channel,
@@ -305,7 +306,7 @@ void updateLEDs(void)
 			 );
 	}
 	
-	/* 4. Select next group's cathodes (3 of them), and set to PWM */
+	/* 4. Set the currently selected group's cathodes (3 of them) to PWM */
 	for(int i=0;i<3;i++){
 		GPIO_PWM(	LEDs[group[currentgroup][i]].cathode->port,
 				LEDs[group[currentgroup][i]].cathode->pin,
@@ -314,16 +315,12 @@ void updateLEDs(void)
 			 );
 	}
 	
- 	/* 5. Set the next group's anode pin HIGH*/
+ 	/* 5. Set currently selected group's anode pin HIGH */
 	GPIO_High(	LEDs[group[currentgroup][0]].anode->port,
 			LEDs[group[currentgroup][0]].anode->pin,
 			LEDs[group[currentgroup][0]].anode->timer,
 			LEDs[group[currentgroup][0]].anode->channel
 		 );
-
-
-
-	/* pin1=T1CH2,PA1, pin7=T1CH4,PC4, pin6=T2CH2_1,PC2,remap, pin5=T2CH4_1,PC1,remap */
 }
 
 /*
@@ -415,18 +412,6 @@ int main() {
 	t1t2_pwm_init();	//initialize timers and outputs for PWM
 	systick_init();		//start systick
 	adc_init();		//start ADC for sw polling
-
-	/*while(1){
-		int Delay = adc_get();
-		Delay_Ms(( Delay >> 3 ) + 5 );
-		int temp=LEDs[0].brightness;
-		for(int i=1; i<12; i++){
-			LEDs[i-1].brightness=LEDs[i].brightness;
-		}
-		LEDs[11].brightness=temp;
-	}*/
-
-       // static uint8_t currentgroup = 0; //the common anode group of LEDs are being worked on
 
 	while(1){
                 int Delay = adc_get();
