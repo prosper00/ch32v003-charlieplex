@@ -16,3 +16,5 @@ make TARGET=main-pwm flash
 make TARGET=main-pwm clean
 ```
 a simple 'make' defaults to build the software PWM verison (which is a bit simpler and easier to follow).
+
+![](https://github.com/prosper00/ch32v003-charlieplex/blob/master/ezgif-3-1ad7c07985.gif)
